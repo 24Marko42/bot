@@ -168,9 +168,16 @@ async def cmd_latest_news(message: Message):
 @dp.message(Command("cvss_score"))
 async def cmd_cvss_score(message: Message):
     log_message(message)
-    await send_and_log(message, "Получаю информацию о CVSS...")
-    info = get_cvss_score()
-    await send_and_log(message, info)
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await send_and_log(message, "Пожалуйста, отправьте вектор CVSS после команды, например:\n"
+                                   "/cvss_score CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
+        return
+    vector = args[1]
+    await send_and_log(message, "Запрашиваю CVSS оценку...")
+    result = get_cvss_score(vector)
+    await send_and_log(message, result)
+
 
 @dp.message(Command("tips"))
 async def cmd_tips(message: Message):
