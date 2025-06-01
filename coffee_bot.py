@@ -13,11 +13,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
-from conf import coffee_bot_token
+from conf import coffee_bot_token, admin_id
 
 API_TOKEN: str = coffee_bot_token
 LOG_DIR: Path = Path("coffee_logs")
 LOG_DIR.mkdir(exist_ok=True)
+ADMIN_ID: int = admin_id
 
 TASTY_URL: str = "https://shop.tastycoffee.ru/coffee?page=2"
 API_COFFEE_LIST_URL: str = "https://api.sampleapis.com/coffee/hot"
@@ -35,7 +36,7 @@ MAIN_KEYBOARD: ReplyKeyboardMarkup = ReplyKeyboardMarkup(
         ],
         [
             KeyboardButton(text="☕ Советы"),
-            KeyboardButton(text="ℹ️ О кофе"),
+            KeyboardButton(text="ℹ️ Предложка"),
         ],
     ],
     resize_keyboard=True
@@ -52,6 +53,9 @@ BREWING_TIPS: List[str] = [
 ABOUT_COFFEE_TEXT: str = (
     "Кофе — напиток из обжаренных зёрен. Повышает бодрость, улучшает настроение, популярен во всём мире."
 )
+
+class Suggestion(StatesGroup):
+    waiting_for_suggestion = State()
 
 class FlavorSearch(StatesGroup):
     waiting_for_flavors = State()
@@ -293,6 +297,30 @@ async def cmd_start(message: Message):
     text = "Привет! Я бот про кофе ☕\nВыбирайте действие через кнопки ниже."
     await message.answer(text, reply_markup=MAIN_KEYBOARD)
 
+@_dp.message(lambda m: m.text == "ℹ️ Предложка")
+async def ask_suggestion(message: Message, state: FSMContext):
+    log_message(message)
+    # Просим прислать текст предложения. 
+    # Одновременно напоминаем, что «ноты вкуса» лучше писать в родительном падеже:
+    text = "📩 Напишите, пожалуйста, ваше предложение или замечание."
+    await message.answer(text)
+    await state.set_state(Suggestion.waiting_for_suggestion)
+
+@_dp.message(Suggestion.waiting_for_suggestion)
+async def process_suggestion(message: Message, state: FSMContext):
+    log_message(message)
+    user = message.from_user
+    # Формируем текст, который нужно переслать администратору
+    forwarded_text = (
+        f"📨 Новая предложка от @{user.username or user.first_name} (ID: {user.id}):\n\n"
+        f"{message.text}"
+    )
+    # Пересылаем вашему боту (админу)
+    await bot.send_message(ADMIN_ID, forwarded_text)
+    # Сообщаем пользователю об успешной отправке
+    await message.answer("✅ Спасибо! Ваше предложение отправлено.")
+    await state.clear()
+
 @_dp.message(lambda m: m.text == "📦 Последние сорта")
 async def latest_coffee(message: Message):
     log_message(message)
@@ -313,10 +341,10 @@ async def brewing_tips(message: Message):
     log_message(message)
     await send_and_log(message, "\n".join(BREWING_TIPS))
 
-@_dp.message(lambda m: m.text == "ℹ️ О кофе")
-async def about_coffee(message: Message):
-    log_message(message)
-    await send_and_log(message, ABOUT_COFFEE_TEXT)
+# @_dp.message(lambda m: m.text == "ℹ️ О кофе")
+# async def about_coffee(message: Message):
+#     log_message(message)
+#     await send_and_log(message, ABOUT_COFFEE_TEXT)
 
 @_dp.message(lambda m: m.text == "🧪 Подбор по вкусам")
 async def select_flavors(message: Message, state: FSMContext):
@@ -325,7 +353,10 @@ async def select_flavors(message: Message, state: FSMContext):
     if not notes:
         await message.answer("Не удалось получить список вкусов 😔")
         return
-    await message.answer("Доступные вкусы:\n" + ", ".join(notes))
+    await message.answer("Доступные вкусы:\n" + ", ".join(notes) +
+        "\n\nℹ️ Если вы используете «Подбор по вкусам», старайтесь вводить нотки в родительном падеже:\n"
+        "например: «красного яблока», «молочного шоколада», «ореховой пасты» и т. п.\n"
+        "(Так бот лучше найдёт совпадения.)")
     await message.answer("Введите нужные вкусы через запятую:")
     await state.set_state(FlavorSearch.waiting_for_flavors)
 
