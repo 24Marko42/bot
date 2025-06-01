@@ -187,47 +187,102 @@ async def get_coffee_random() -> str:
     return f"🎲 <b>{title_ru}</b>\n\n{desc_ru}"
 
 async def get_all_flavor_notes() -> List[str]:
-    async with aiohttp.ClientSession() as session:
-        html = await fetch_html(session, TASTY_URL)
-        if not html:
-            return []
-    soup = BeautifulSoup(html, "html.parser")
-    items = soup.select("div.product-item")
+    page = 1
     notes_set = set()
-    for item in items:
-        desc_container = item.select_one("div.tc-tile__description")
-        if not desc_container:
-            continue
-        description_p = desc_container.find("p")
-        if not description_p:
-            continue
-        for span in description_p.select("span.descriptor-badge"):
-            notes_set.add(span.get_text(strip=True).lower())
+
+    while True:
+        url = f"https://shop.tastycoffee.ru/coffee?page={page}"
+        async with aiohttp.ClientSession() as session:
+            html = await fetch_html(session, url)
+        if not html:
+            break  # не удалось получить HTML (либо страница кончилась)
+
+        soup = BeautifulSoup(html, "html.parser")
+        items = soup.select("div.product-item")
+        if not items:
+            break  # дошли до пустой страницы
+        
+        for item in items:
+            desc_container = item.select_one("div.tc-tile__description")
+            if not desc_container:
+                continue
+            description_p = desc_container.find("p")
+            if not description_p:
+                continue
+            # Сбор всех «значков» нот
+            for span in description_p.select("span.descriptor-badge"):
+                notes_set.add(span.get_text(strip=True).lower())
+        
+        page += 1
+
     return sorted(notes_set)
 
 async def find_coffee_by_flavors(flavors: List[str]) -> List[str]:
-    async with aiohttp.ClientSession() as session:
-        html = await fetch_html(session, TASTY_URL)
+    page = 1
+    results: List[str] = []
+
+    # Переводим все запросы пользователя в нижний регистр один раз
+    user_flavors = [f.lower() for f in flavors]
+
+    while True:
+        url = f"https://shop.tastycoffee.ru/coffee?page={page}"
+        async with aiohttp.ClientSession() as session:
+            html = await fetch_html(session, url)
         if not html:
-            return ["Ошибка загрузки."]
-    soup = BeautifulSoup(html, "html.parser")
-    items = soup.select("div.product-item")
-    results = []
-    for item in items:
-        title_tag = item.select_one("div.tc-tile__title a")
-        name_en = title_tag.get_text(strip=True) if title_tag else "—"
-        link = BASE_URL + (title_tag.get("href", "") if title_tag else "")
-        name_ru = await translate_text(name_en)
-        desc_container = item.select_one("div.tc-tile__description")
-        if not desc_container:
-            continue
-        description_p = desc_container.find("p")
-        if not description_p:
-            continue
-        notes = [s.get_text(strip=True).lower() for s in description_p.select("span.descriptor-badge")]
-        if all(f in notes for f in flavors):
-            results.append(f"☕ <b>{name_ru}</b>\nВкусы: {', '.join(notes)}\n🔗 <a href=\"{link}\">Ссылка</a>")
+            break  # не удалось получить HTML, считаем, что страниц больше нет
+
+        soup = BeautifulSoup(html, "html.parser")
+        items = soup.select("div.product-item")
+        if not items:
+            break
+
+        for item in items:
+            title_tag = item.select_one("div.tc-tile__title a")
+            if not title_tag:
+                continue
+
+            # Берём «сырое» название и сразу переводим
+            name_en = title_tag.get_text(separator=" ", strip=True)
+            name_ru = await translate_text(name_en, dest="ru")
+
+            # Ссылка на продукт
+            link = BASE_URL + title_tag.get("href", "")
+
+            # Извлекаем цену как plain text, без тега <span>
+            price_tag = item.select_one("span.text-nowrap")
+            price_text = price_tag.get_text(strip=True) if price_tag else "—"
+
+            # Собираем блок описания
+            desc_container = item.select_one("div.tc-tile__description")
+            if not desc_container:
+                continue
+            description_p = desc_container.find("p")
+            if not description_p:
+                continue
+
+            # Собираем все ноты (в нижнем регистре)
+            notes = [s.get_text(strip=True).lower() for s in description_p.select("span.descriptor-badge")]
+
+            # Проверяем, что каждая «вкусовая нота» из user_flavors
+            # содержится как подстрока в одном из элементов notes
+            match = True
+            for uf in user_flavors:
+                if not any(uf in note for note in notes):
+                    match = False
+                    break
+
+            if match:
+                results.append(
+                    f"☕ <b>{name_ru}</b>\n"
+                    f"Вкусы: {', '.join(notes)}\n"
+                    f"💰 Цена: {price_text}\n"
+                    f"🔗 <a href=\"{link}\">Ссылка</a>"
+                )
+
+        page += 1
+
     return results or ["Совпадений не найдено."]
+
 
 bot = Bot(token=API_TOKEN)
 _dp = Dispatcher()
