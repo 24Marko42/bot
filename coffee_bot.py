@@ -2,67 +2,109 @@ import asyncio  # Для запуска асинхронных функций
 from datetime import datetime  # Для отметок времени в логах
 from pathlib import Path  # Для работы с файловой системой
 from typing import List, Union, Optional  # Аннотации типов
+import random
 
-import aiohttp  # Асинхронные HTTP-запросы
-from bs4 import BeautifulSoup  # Для парсинга HTML
-from aiogram import Bot, Dispatcher, types  # Основные классы Aiogram
-from aiogram.filters.command import Command  # Фильтр для команд
+import aiohttp
+from bs4 import BeautifulSoup
+from aiogram import Bot, Dispatcher, types
+from aiogram.enums import ParseMode
+from aiogram.filters.command import Command
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.enums import ParseMode  # Для указания HTML-формата при отправке
-import urllib.parse
 
-from conf import coffee_bot_token  # Предположим, что токен лежит здесь
+from conf import coffee_bot_token
 
-# === КОНСТАНТЫ ===
-API_TOKEN: str = coffee_bot_token  # Токен Telegram-бота
-LOG_DIR: Path = Path("coffee_logs")  # Папка для логов
-LOG_DIR.mkdir(exist_ok=True)  # Создаём папку, если её нет
+API_TOKEN: str = coffee_bot_token
+LOG_DIR: Path = Path("coffee_logs")
+LOG_DIR.mkdir(exist_ok=True)
 
-TASTY_URL: str = "https://shop.tastycoffee.ru/coffee?page=2"  # Страница с товарами
-API_COFFEE_LIST_URL: str = "https://api.sampleapis.com/coffee/hot"  # API списка кофе
-BASE_URL: str = "https://shop.tastycoffee.ru"  # Для полного URL товаров
+TASTY_URL: str = "https://shop.tastycoffee.ru/coffee?page=2"
+API_COFFEE_LIST_URL: str = "https://api.sampleapis.com/coffee/hot"
+BASE_URL: str = "https://shop.tastycoffee.ru"
 
-# Клавиатура, показываемая при /start
 MAIN_KEYBOARD: ReplyKeyboardMarkup = ReplyKeyboardMarkup(
     keyboard=[
         [
-            KeyboardButton(text="/latest_coffee"),
-            KeyboardButton(text="/coffee_random"),
-            KeyboardButton(text="/coffee_list"),
+            KeyboardButton(text="📦 Последние сорта"),
+            KeyboardButton(text="🎲 Случайный кофе"),
         ],
         [
-            KeyboardButton(text="/brewing_tips"),
-            KeyboardButton(text="/about_coffee"),
+            KeyboardButton(text="📋 Список сортов"),
+            KeyboardButton(text="🧪 Подбор по вкусам"),
+        ],
+        [
+            KeyboardButton(text="☕ Советы"),
+            KeyboardButton(text="ℹ️ О кофе"),
         ],
     ],
     resize_keyboard=True
 )
 
-# Советы по приготовлению кофе
 BREWING_TIPS: List[str] = [
-    "1. Используйте свежемолотый кофе для лучшего вкуса.",
-    "2. Соблюдайте правильную температуру воды — 92‑96°C.",
-    "3. Не заливайте кофе кипятком, чтобы избежать горечи.",
-    "4. Используйте правильную пропорцию: около 60 г кофе на литр воды.",
-    "5. Экспериментируйте с разными помолами для разных способов приготовления.",
+    "1. Используйте свежемолотый кофе.",
+    "2. Температура воды — 92‑96°C.",
+    "3. Не заливайте кипятком — горечь!",
+    "4. Пропорция: 60 г кофе на литр воды.",
+    "5. Экспериментируйте с помолом.",
 ]
 
-# Информация про кофе
 ABOUT_COFFEE_TEXT: str = (
-    "Кофе — это напиток, приготовленный из обжаренных зёрен кофейного дерева.\n"
-    "Существует множество сортов и способов его приготовления. Кофе повышает бодрость, "
-    "улучшает настроение и является одним из самых популярных напитков в мире."
+    "Кофе — напиток из обжаренных зёрен. Повышает бодрость, улучшает настроение, популярен во всём мире."
 )
 
-# === ФУНКЦИЯ-ПЕРЕВОДЧИК через LibreTranslate ===
-async def translate_text(text: str, dest: str = "ru") -> str:
-    """
-    Переводит текст с помощью "неофициального" Google Translate API:
-      GET https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=<dest>&dt=t&q=<вроде бы URL‑encoded текст>
-    Если перевод не удаётся, возвращает исходный текст.
-    """
+class FlavorSearch(StatesGroup):
+    waiting_for_flavors = State()
+
+def log_message(message: Message) -> None:
+    user = message.from_user
+    log_file = LOG_DIR / f"user_{user.id}.log"
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().isoformat()} | {user.id} | {message.text}\n")
+
+async def send_and_log(message: Message, content: Union[str, List[str]]) -> None:
+    user = message.from_user
+    log_file = LOG_DIR / f"user_{user.id}.log"
+    def _log(entry: str):
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} | Bot: {entry}\n")
+    if isinstance(content, list):
+        for text in content:
+            await message.answer(text, parse_mode=ParseMode.HTML)
+            _log(text)
+    else:
+        await message.answer(content, parse_mode=ParseMode.HTML)
+        _log(content)
+
+async def fetch_html(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     try:
-        # URL‑encode текста
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                return await resp.text()
+    except:
+        return None
+
+async def parse_coffee_page(url: str = TASTY_URL, limit: int = 5) -> List[str]:
+    async with aiohttp.ClientSession() as session:
+        html = await fetch_html(session, url)
+        if not html:
+            return ["❌ Не удалось загрузить страницу."]
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select("div.product-item")
+    results = []
+    for idx, item in enumerate(items[:limit]):
+        title_tag = item.select_one("div.tc-tile__title a")
+        name = title_tag.get_text(strip=True) if title_tag else "—"
+        rel_link = title_tag.get("href", "") if title_tag else ""
+        full_link = BASE_URL + rel_link
+        price_tag = item.select_one(".tc-tile__price span")
+        price_text = price_tag.get_text(strip=True) if price_tag else "—"
+        results.append(f"☕ <b>{name}</b>\n💰 {price_text}\n🔗 <a href=\"{full_link}\">Ссылка</a>")
+    return results or ["ℹ️ Нет данных."]
+
+async def translate_text(text: str, dest: str = "ru") -> str:
+    import urllib.parse
+    try:
         encoded = urllib.parse.quote(text)
         url = (
             f"https://translate.googleapis.com/translate_a/single"
@@ -72,265 +114,140 @@ async def translate_text(text: str, dest: str = "ru") -> str:
             async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
                     return text
-                # Ответ—JSON, например: [[[ "Переведённый текст", ... ]], ...]
                 arr = await resp.json()
-                # Первым элементом массива arr[0][0][0] лежит переведённая строка
                 if isinstance(arr, list) and arr and isinstance(arr[0], list):
-                    translated = arr[0][0][0]
-                    return translated
+                    return arr[0][0][0]
                 else:
                     return text
-    except Exception:
+    except:
         return text
 
-# === ЛОГИРОВАНИЕ ===
-def log_message(message: Message) -> None:
-    """
-    Логируем входящее сообщение в файл coffee_logs/user_<id>.log.
-    """
-    user = message.from_user
-    log_file = LOG_DIR / f"user_{user.id}.log"
-    text = message.text or ""
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(
-            f"{datetime.now().isoformat()} | "
-            f"User {user.id} ({user.full_name} | @{user.username}) | "
-            f"Message: {text}\n"
-        )
-
-async def send_and_log(message: Message, content: Union[str, List[str]]) -> None:
-    """
-    Отправляем одной строкой или списком строк и логируем.
-    Если content — список, отправляем каждый элемент отдельно.
-    """
-    user = message.from_user
-    log_file = LOG_DIR / f"user_{user.id}.log"
-
-    def _write_log(entry: str) -> None:
-        with open(log_file, "a", encoding="utf-8") as f_log:
-            f_log.write(f"{datetime.now().isoformat()} | Bot sent: {entry}\n")
-
-    if isinstance(content, list):
-        for text in content:
-            await message.answer(text, parse_mode=ParseMode.HTML)
-            _write_log(text)
-    else:
-        await message.answer(content, parse_mode=ParseMode.HTML)
-        _write_log(content)
-
-# === АСИНХРОННЫЕ HTTP‑ФУНКЦИИ ===
-async def fetch_html(session: aiohttp.ClientSession, url: str) -> Optional[str]:
-    """
-    Асинхронный GET-запрос, возвращает HTML либо None.
-    """
-    try:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                return await resp.text()
-            else:
-                return None
-    except asyncio.TimeoutError:
-        return None
-    except aiohttp.ClientError:
-        return None
-
-async def parse_coffee_page(url: str = TASTY_URL, limit: int = 5) -> List[str]:
-    """
-    Парсим страницу tastycoffee.ru/coffee?page=2, извлекаем первые `limit` товаров:
-      • название (английское) → переводим
-      • цена
-      • ссылка
-      • описание (английское) → переводим
-      • ноты вкуса (обычно уже на русском)
-    Возвращаем список форматированных HTML-строк. Если не удалось, возвращаем строку-ошибку.
-    """
-    async with aiohttp.ClientSession() as session:
-        html = await fetch_html(session, url)
-        if not html:
-            return ["❌ Ошибка при запросе к tastycoffee.ru"]
-
-    soup = BeautifulSoup(html, "html.parser")
-    # Селектор под текущую верстку: карточки имеют класс "product-item"
-    items = soup.select("div.product-item")
-    results: List[str] = []
-
-    for idx, item in enumerate(items):
-        if idx >= limit:
-            break  # Берём не более limit товаров
-
-        # 1) Название и ссылка в <div.tc-tile__title a>
-        title_tag = item.select_one("div.tc-tile__title a")
-        if not title_tag:
-            continue
-        name_en = title_tag.get_text(strip=True)
-        # Асинхронно переводим название
-        name_ru = await translate_text(name_en, dest="ru")
-        rel_link = title_tag.get("href", "").strip()
-        full_link = BASE_URL + rel_link
-
-        # 2) Цена в <div class="product_price__value">
-        price_tag = item.select_one(".product_price__value")
-        price_text = price_tag.get_text(strip=True) if price_tag else "—"
-
-        # 3) Описание внутри <p class="text-[14px] ...">
-        desc_container = item.select_one("div.tc-tile__description")
-        if desc_container:
-            description_p = desc_container.find("p", class_="text-[14px]")
-            if description_p:
-                description_en = description_p.get_text(separator=" ", strip=True)
-                # Асинхронно переводим описание
-                description_ru = await translate_text(description_en, dest="ru")
-            else:
-                description_ru = ""
-        else:
-            description_ru = ""
-
-        # 4) Ноты вкуса (<span class="descriptor-badge">)
-        notes_list = []
-        if desc_container and description_p:
-            for span in description_p.find_all("span", class_="descriptor-badge"):
-                notes_list.append(span.get_text(strip=True))
-        notes_text = ", ".join(notes_list) if notes_list else "—"
-
-        results.append(
-            f"☕ <b>{name_ru}</b>\n"  # Название (уже на русском)
-            f"💰 {price_text}\n"      # Цена
-            f"🔗 <a href=\"{full_link}\">Ссылка</a>\n\n"  # Ссылка
-            f"ℹ️ <i>{description_ru}</i>\n\n"  # Описание (на русском)
-            f"Ноты вкуса: {notes_text}"       # Ноты вкуса
-        )
-
-    if not results:
-        return ["ℹ️ Не удалось найти товары на странице."]
-    return results
-
 async def get_coffee_list() -> str:
-    """
-    Асинхронно получает первые 10 названий сортов кофе и переводит их на русский.
-    """
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(API_COFFEE_LIST_URL, timeout=10) as resp:
-                resp.raise_for_status()
+            async with session.get(API_COFFEE_LIST_URL) as resp:
                 data = await resp.json()
     except Exception as e:
-        return f"❌ Ошибка при получении списка кофе: {e}"
-
-    result_lines = ["Популярные сорта кофе из API:"]
+        return f"Ошибка: {e}"
+    lines = ["Популярные сорта:"]
     for item in data[:10]:
-        title_en = item.get("title", "—")
-        try:
-            title_ru = await translate_text(title_en, dest="ru")
-        except Exception:
-            title_ru = title_en
-        result_lines.append(f"• {title_ru}")
-    
-    return "\n".join(result_lines)
+        en = item.get("title", "—")
+        ru = await translate_text(en, dest="ru")
+        lines.append(f"• {ru}")
+    return "\n".join(lines)
 
 async def get_coffee_random() -> str:
-    """
-    Асинхронно берёт весь список кофе и возвращает один случайный элемент.
-    Переводит название и описание на русский.
-    """
-    import random
-
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(API_COFFEE_LIST_URL, timeout=10) as resp:
-                resp.raise_for_status()
+            async with session.get(API_COFFEE_LIST_URL) as resp:
                 data = await resp.json()
-    except Exception as e:
-        return f"❌ Ошибка при получении данных для случайного кофе: {e}"
-
-    if not isinstance(data, list) or not data:
-        return "ℹ️ Данные от API пришли в неожиданном формате."
-
+    except:
+        return "Ошибка API"
     item = random.choice(data)
-    title_en = item.get("title", "—")
-    description_en = item.get("description", "Описание отсутствует")
+    title = item.get("title", "—")
+    desc = item.get("description", "—")
+    title_ru = await translate_text(title, dest="ru")
+    desc_ru = await translate_text(desc, dest="ru")
+    return f"🎲 <b>{title_ru}</b>\n\n{desc_ru}"
 
-    try:
-        title_ru = await translate_text(title_en, dest="ru")
-        description_ru = await translate_text(description_en, dest="ru")
-    except Exception:
-        title_ru = title_en
-        description_ru = description_en
+async def get_all_flavor_notes() -> List[str]:
+    async with aiohttp.ClientSession() as session:
+        html = await fetch_html(session, TASTY_URL)
+        if not html:
+            return []
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select("div.product-item")
+    notes_set = set()
+    for item in items:
+        desc_container = item.select_one("div.tc-tile__description")
+        if not desc_container:
+            continue
+        description_p = desc_container.find("p")
+        if not description_p:
+            continue
+        for span in description_p.select("span.descriptor-badge"):
+            notes_set.add(span.get_text(strip=True).lower())
+    return sorted(notes_set)
 
-    return (
-        f"🎲 <b>Случайный кофе</b>:\n\n"
-        f"Название: <b>{title_ru}</b>\n\n"
-        f"Описание:\n{description_ru}"
-    )
+async def find_coffee_by_flavors(flavors: List[str]) -> List[str]:
+    async with aiohttp.ClientSession() as session:
+        html = await fetch_html(session, TASTY_URL)
+        if not html:
+            return ["Ошибка загрузки."]
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select("div.product-item")
+    results = []
+    for item in items:
+        title_tag = item.select_one("div.tc-tile__title a")
+        name_en = title_tag.get_text(strip=True) if title_tag else "—"
+        link = BASE_URL + (title_tag.get("href", "") if title_tag else "")
+        name_ru = await translate_text(name_en)
+        desc_container = item.select_one("div.tc-tile__description")
+        if not desc_container:
+            continue
+        description_p = desc_container.find("p")
+        if not description_p:
+            continue
+        notes = [s.get_text(strip=True).lower() for s in description_p.select("span.descriptor-badge")]
+        if all(f in notes for f in flavors):
+            results.append(f"☕ <b>{name_ru}</b>\nВкусы: {', '.join(notes)}\n🔗 <a href=\"{link}\">Ссылка</a>")
+    return results or ["Совпадений не найдено."]
 
-# === СОЗДАЁМ БОТА И ДИСПЕТЧЕР ===
-bot: Bot = Bot(token=API_TOKEN)
-dp: Dispatcher = Dispatcher()
+bot = Bot(token=API_TOKEN)
+_dp = Dispatcher()
 
-@dp.message(Command("start"))
-async def cmd_start(message: Message) -> None:
-    """
-    Команда /start: логируем, отправляем приветствие и показываем MAIN_KEYBOARD.
-    """
+@_dp.message(Command("start"))
+async def cmd_start(message: Message):
     log_message(message)
-    welcome_text = (
-        "Привет! Я бот про кофе ☕\n\n"
-        "Вот мои команды:\n"
-        "/latest_coffee — последние 5 сортов кофе с tastycoffee.ru (с переводом)\n"
-        "/coffee_random — случайный кофе из API (с переводом)\n"
-        "/coffee_list — список популярных сортов кофе из API (с переводом)\n"
-        "/brewing_tips — советы по приготовлению кофе\n"
-        "/about_coffee — кратко о кофе"
-    )
-    await message.answer(welcome_text, reply_markup=MAIN_KEYBOARD)
+    text = "Привет! Я бот про кофе ☕\nВыбирайте действие через кнопки ниже."
+    await message.answer(text, reply_markup=MAIN_KEYBOARD)
 
-@dp.message(Command("latest_coffee"))
-async def cmd_latest_coffee(message: Message) -> None:
-    """
-    Команда /latest_coffee: парсим и шлём первые 5 товаров (названия и описания переведены).
-    """
+@_dp.message(lambda m: m.text == "📦 Последние сорта")
+async def latest_coffee(message: Message):
     log_message(message)
-    await send_and_log(message, "🔍 Получаем последние 5 сортов кофе…")
-    products = await parse_coffee_page()
-    await send_and_log(message, products)
+    await send_and_log(message, await parse_coffee_page())
 
-@dp.message(Command("coffee_random"))
-async def cmd_coffee_random(message: Message) -> None:
-    """
-    Команда /coffee_random: шлём случайный кофе из API (переведен).
-    """
+@_dp.message(lambda m: m.text == "🎲 Случайный кофе")
+async def random_coffee(message: Message):
     log_message(message)
-    await send_and_log(message, "🍀 Ищу случайный кофе в API…")
-    random_info = await get_coffee_random()
-    await send_and_log(message, random_info)
+    await send_and_log(message, await get_coffee_random())
 
-@dp.message(Command("coffee_list"))
-async def cmd_coffee_list(message: Message) -> None:
-    """
-    Команда /coffee_list: шлём список первых 10 сортов из API (переведено).
-    """
+@_dp.message(lambda m: m.text == "📋 Список сортов")
+async def coffee_list(message: Message):
     log_message(message)
-    await send_and_log(message, "📋 Получаю список популярных сортов кофе…")
-    coffee_list_text = await get_coffee_list()
-    await send_and_log(message, coffee_list_text)
+    await send_and_log(message, await get_coffee_list())
 
-@dp.message(Command("brewing_tips"))
-async def cmd_brewing_tips(message: Message) -> None:
-    """
-    Команда /brewing_tips: шлём советы по приготовлению кофе.
-    """
+@_dp.message(lambda m: m.text == "☕ Советы")
+async def brewing_tips(message: Message):
     log_message(message)
-    tips_text = "\n".join(BREWING_TIPS)
-    await send_and_log(message, tips_text)
+    await send_and_log(message, "\n".join(BREWING_TIPS))
 
-@dp.message(Command("about_coffee"))
-async def cmd_about_coffee(message: Message) -> None:
-    """
-    Команда /about_coffee: шлём информацию о кофе.
-    """
+@_dp.message(lambda m: m.text == "ℹ️ О кофе")
+async def about_coffee(message: Message):
     log_message(message)
     await send_and_log(message, ABOUT_COFFEE_TEXT)
 
-# === ТОЧКА ВХОДА ===
+@_dp.message(lambda m: m.text == "🧪 Подбор по вкусам")
+async def select_flavors(message: Message, state: FSMContext):
+    log_message(message)
+    notes = await get_all_flavor_notes()
+    if not notes:
+        await message.answer("Не удалось получить список вкусов 😔")
+        return
+    await message.answer("Доступные вкусы:\n" + ", ".join(notes))
+    await message.answer("Введите нужные вкусы через запятую:")
+    await state.set_state(FlavorSearch.waiting_for_flavors)
+
+@_dp.message(FlavorSearch.waiting_for_flavors)
+async def process_flavors(message: Message, state: FSMContext):
+    log_message(message)
+    flavors = [f.strip().lower() for f in message.text.split(",") if f.strip()]
+    if not flavors:
+        await message.answer("Не распознаны вкусы. Повторите ввод:")
+        return
+    await send_and_log(message, await find_coffee_by_flavors(flavors))
+    await state.clear()
+
 if __name__ == "__main__":
-    print("☕ Кофейный бот запущен…")
-    asyncio.run(dp.start_polling(bot))
+    print("Кофе-бот запущен...")
+    asyncio.run(_dp.start_polling(bot))
