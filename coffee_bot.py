@@ -58,15 +58,13 @@ class FlavorSearch(StatesGroup):
 
 def log_message(message: Message) -> None:
     user = message.from_user
-    username = user.username or f"id{user.id}"
-    log_file = LOG_DIR / f"{username}_{user.id}.log"
+    log_file = LOG_DIR / f"{user.first_name}_{user.username}.log"
     with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now().isoformat()} | {user.id} | @{username} | {message.text}\n")
+        f.write(f"{datetime.now().isoformat()} | {user.first_name} | {user.username} | {user.id} | {message.text}\n")
 
 async def send_and_log(message: Message, content: Union[str, List[str]]) -> None:
     user = message.from_user
-    username = user.username or f"id{user.id}"
-    log_file = LOG_DIR / f"{username}_{user.id}.log"
+    log_file = LOG_DIR / f"{user.first_name}_{user.username}.log"
     def _log(entry: str):
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat()} | Bot: {entry}\n")
@@ -77,7 +75,6 @@ async def send_and_log(message: Message, content: Union[str, List[str]]) -> None
     else:
         await message.answer(content, parse_mode=ParseMode.HTML)
         _log(content)
-
 
 async def fetch_html(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     try:
@@ -142,26 +139,24 @@ async def parse_coffee_page(url: str = TASTY_URL, limit: int = 5) -> List[str]:
     return results
 
 async def translate_text(text: str, dest: str = "ru") -> str:
-    import json
-    url = "https://libretranslate.de/translate"
-    payload = {
-        "q": text,
-        "source": "en",
-        "target": dest,
-        "format": "text"
-    }
-    headers = {"Content-Type": "application/json"}
+    import urllib.parse
     try:
+        encoded = urllib.parse.quote(text)
+        url = (
+            f"https://translate.googleapis.com/translate_a/single"
+            f"?client=gtx&sl=auto&tl={dest}&dt=t&q={encoded}"
+        )
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=json.dumps(payload), headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("translatedText", text)
+            async with session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    return text
+                arr = await resp.json()
+                if isinstance(arr, list) and arr and isinstance(arr[0], list):
+                    return arr[0][0][0]
                 else:
                     return text
-    except Exception:
+    except:
         return text
-
 
 async def get_coffee_list() -> str:
     try:
@@ -211,40 +206,28 @@ async def get_all_flavor_notes() -> List[str]:
     return sorted(notes_set)
 
 async def find_coffee_by_flavors(flavors: List[str]) -> List[str]:
-    results = []
-    page = 1
-    while True:
-        page_url = f"https://shop.tastycoffee.ru/coffee?page={page}"
-        async with aiohttp.ClientSession() as session:
-            html = await fetch_html(session, page_url)
+    async with aiohttp.ClientSession() as session:
+        html = await fetch_html(session, TASTY_URL)
         if not html:
-            break
-        soup = BeautifulSoup(html, "html.parser")
-        items = soup.select("div.product-item")
-        if not items:
-            break
-        for item in items:
-            title_tag = item.select_one("div.tc-tile__title a")
-            name_en = title_tag.get_text(strip=True) if title_tag else "—"
-            link = BASE_URL + (title_tag.get("href", "") if title_tag else "")
-            name_ru = await translate_text(name_en)
-            desc_container = item.select_one("div.tc-tile__description")
-            if not desc_container:
-                continue
-            description_p = desc_container.find("p")
-            if not description_p:
-                continue
-            notes = [s.get_text(strip=True).lower() for s in description_p.select("span.descriptor-badge")]
-            # Один вкус — достаточно совпадения с любым
-            if len(flavors) == 1:
-                if any(f in notes for f in flavors):
-                    results.append(f"☕ <b>{name_ru}</b>\nВкусы: {', '.join(notes)}\n🔗 <a href=\"{link}\">Ссылка</a>")
-            else:
-                if all(f in notes for f in flavors):
-                    results.append(f"☕ <b>{name_ru}</b>\nВкусы: {', '.join(notes)}\n🔗 <a href=\"{link}\">Ссылка</a>")
-        page += 1
+            return ["Ошибка загрузки."]
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select("div.product-item")
+    results = []
+    for item in items:
+        title_tag = item.select_one("div.tc-tile__title a")
+        name_en = title_tag.get_text(strip=True) if title_tag else "—"
+        link = BASE_URL + (title_tag.get("href", "") if title_tag else "")
+        name_ru = await translate_text(name_en)
+        desc_container = item.select_one("div.tc-tile__description")
+        if not desc_container:
+            continue
+        description_p = desc_container.find("p")
+        if not description_p:
+            continue
+        notes = [s.get_text(strip=True).lower() for s in description_p.select("span.descriptor-badge")]
+        if all(f in notes for f in flavors):
+            results.append(f"☕ <b>{name_ru}</b>\nВкусы: {', '.join(notes)}\n🔗 <a href=\"{link}\">Ссылка</a>")
     return results or ["Совпадений не найдено."]
-
 
 bot = Bot(token=API_TOKEN)
 _dp = Dispatcher()
