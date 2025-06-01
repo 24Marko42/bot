@@ -13,9 +13,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
-from conf import coffee_bot_token, admin_id
+from conf import token_vega, admin_id
 
-API_TOKEN: str = coffee_bot_token
+API_TOKEN: str = token_vega
 LOG_DIR: Path = Path("coffee_logs")
 LOG_DIR.mkdir(exist_ok=True)
 ADMIN_ID: int = admin_id
@@ -31,7 +31,7 @@ MAIN_KEYBOARD: ReplyKeyboardMarkup = ReplyKeyboardMarkup(
             KeyboardButton(text="🎲 Случайный кофе"),
         ],
         [
-            KeyboardButton(text="📋 Список напитков"),
+            KeyboardButton(text="📋 Список сортов"),
             KeyboardButton(text="🧪 Подбор по вкусам"),
         ],
         [
@@ -221,15 +221,15 @@ async def find_coffee_by_flavors(flavors: List[str]) -> List[str]:
     page = 1
     results: List[str] = []
 
-    # Переводим запросы пользователя в нижний регистр и очищаем пробелы
-    user_flavors = [f.strip().lower() for f in flavors if f.strip()]
+    # Переводим все запросы пользователя в нижний регистр один раз
+    user_flavors = [f.lower() for f in flavors]
 
     while True:
         url = f"https://shop.tastycoffee.ru/coffee?page={page}"
         async with aiohttp.ClientSession() as session:
             html = await fetch_html(session, url)
         if not html:
-            break  # считаем, что страниц больше нет
+            break  # не удалось получить HTML, считаем, что страниц больше нет
 
         soup = BeautifulSoup(html, "html.parser")
         items = soup.select("div.product-item")
@@ -248,37 +248,30 @@ async def find_coffee_by_flavors(flavors: List[str]) -> List[str]:
             # Ссылка на продукт
             link = BASE_URL + title_tag.get("href", "")
 
-            # Извлекаем цену как plain text
+            # Извлекаем цену как plain text, без тега <span>
             price_tag = item.select_one("span.text-nowrap")
             price_text = price_tag.get_text(strip=True) if price_tag else "—"
 
-            # Блок описания
+            # Собираем блок описания
             desc_container = item.select_one("div.tc-tile__description")
-            if not desc_container:
-                continue
-            description_p = desc_container.find("p", class_="text-[14px]")
-            if not description_p:
-                continue
-            description_en = description_p.get_text(separator=" ", strip=True)
-            description_ru = await translate_text(description_en, dest="ru")
+            if desc_container:
+                description_p = desc_container.find("p", class_="text-[14px]")
+                if description_p:
+                    description_en = description_p.get_text(separator=" ", strip=True)
+                    description_ru = await translate_text(description_en, dest="ru")
+                else:
+                    description_ru = ""
+            else:
+                description_ru = ""
 
             # Собираем все ноты (в нижнем регистре)
             notes = [s.get_text(strip=True).lower() for s in description_p.select("span.descriptor-badge")]
 
-            # Проверяем каждый фильтр из user_flavors:
-            # для многословных фильтров разбиваем на слова
-            # и ищем ноту, где все слова встречаются
+            # Проверяем, что каждая «вкусовая нота» из user_flavors
+            # содержится как подстрока в одном из элементов notes
             match = True
             for uf in user_flavors:
-                words = uf.split()
-                found_this_flavor = False
-
-                for note in notes:
-                    if all(word in note for word in words):
-                        found_this_flavor = True
-                        break
-
-                if not found_this_flavor:
+                if not any(uf in note for note in notes):
                     match = False
                     break
 
@@ -294,7 +287,6 @@ async def find_coffee_by_flavors(flavors: List[str]) -> List[str]:
         page += 1
 
     return results or ["Совпадений не найдено."]
-
 
 
 bot = Bot(token=API_TOKEN)
